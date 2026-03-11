@@ -106,13 +106,14 @@ import cv2
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout
+from ultralytics import YOLO 
 
 
 class CameraWorker(QThread):
     frameReady = pyqtSignal(object)   # emits numpy array (BGR)
     cameraError = pyqtSignal(str)
 
-    def __init__(self, camera_index: int = 0, fps: int = 30):
+    def __init__(self, camera_index: int = 0, fps: int = 15):
         super().__init__()
         self.camera_index = camera_index
         self.fps = fps
@@ -152,7 +153,7 @@ class ClickableLabel(QLabel):
 
 
 class WebcamViewer(QWidget):
-    def __init__(self, camera_index: int = 0, fps: int = 30):
+    def __init__(self, camera_index: int = 0, fps: int = 15, confidence: float = 0.7):
         super().__init__()
         self.setWindowTitle("Webcam Stream - QThread")
         self.label = ClickableLabel("Starting camera...")
@@ -168,11 +169,14 @@ class WebcamViewer(QWidget):
         self.sidebar_coords.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.sidebar_sample = QLabel("color: -")
         self.sidebar_sample.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_box = QLabel("box: -")
+        self.sidebar_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         sidebar = QVBoxLayout()
         sidebar.addWidget(self.sidebar_title)
         sidebar.addWidget(self.sidebar_coords)
         sidebar.addWidget(self.sidebar_sample)
+        sidebar.addWidget(self.sidebar_box)
         sidebar.addStretch(1)
 
         main = QHBoxLayout()
@@ -189,11 +193,46 @@ class WebcamViewer(QWidget):
         self.worker.cameraError.connect(self.on_camera_error)
         self.worker.start()
         self._last_frame = None
+        self._frame_count = 0
+        self._last_boxes = []
+        self.confidence = confidence
+        try:
+            self.detector = YOLO("yolov8n.pt")
+        except Exception as exc:
+            print(exc)
+            self.detector = None
+            QMessageBox.warning(self, "Model Load Error", f"Could not load yolov8n-face.pt: {exc}")
 
     @pyqtSlot(object)
     def on_frame(self, frame_bgr):
         self._last_frame = frame_bgr
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        self._frame_count += 1
+
+        if self.detector is not None and self._frame_count % 5 == 0:
+            results = self.detector(frame_bgr, conf = self.confidence, verbose=False)
+            boxes = []
+            if results and len(results) > 0 and results[0].boxes is not None:
+                for idx, b in enumerate(results[0].boxes.xyxy.cpu().tolist(), start=1):
+                    x1, y1, x2, y2 = map(int, b)
+                    boxes.append({"id": idx, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+            self._last_boxes = boxes
+
+        display_frame = frame_bgr.copy()
+        for box in self._last_boxes:
+            x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                display_frame,
+                f"ID {box['id']}",
+                (x1, max(0, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+
+        rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
@@ -205,17 +244,65 @@ class WebcamViewer(QWidget):
 
     @pyqtSlot(int, int)
     def on_label_clicked(self, x, y):
-        self.sidebar_coords.setText(f"x: {x}, y: {y}")
         if self._last_frame is None:
+            self.sidebar_coords.setText(f"x: {x}, y: {y}")
             self.sidebar_sample.setText("color: -")
+            self.sidebar_box.setText("box: -")
             return
 
+        mapped = self._map_label_to_frame(x, y)
+        if mapped is None:
+            self.sidebar_coords.setText(f"x: {x}, y: {y} (outside frame)")
+            self.sidebar_sample.setText("color: out of bounds")
+            self.sidebar_title.setText("Clicked Pixel")
+            self.sidebar_box.setText("box: -")
+            return
+
+        fx, fy = mapped
+        self.sidebar_coords.setText(f"x: {fx}, y: {fy}")
+
         h, w, _ = self._last_frame.shape
-        if 0 <= x < w and 0 <= y < h:
-            b, g, r = self._last_frame[y, x]
+        if 0 <= fx < w and 0 <= fy < h:
+            b, g, r = self._last_frame[fy, fx]
             self.sidebar_sample.setText(f"color: r={int(r)}, g={int(g)}, b={int(b)}")
         else:
             self.sidebar_sample.setText("color: out of bounds")
+
+        hit = self._box_at_point(fx, fy)
+        if hit is not None:
+            self.sidebar_title.setText("Clicked Pixel (IN FACE)")
+            self.sidebar_box.setText(
+                f"box: id={hit['id']} [{hit['x1']},{hit['y1']}] - [{hit['x2']},{hit['y2']}]"
+            )
+        else:
+            self.sidebar_title.setText("Clicked Pixel")
+            self.sidebar_box.setText("box: -")
+
+    def _map_label_to_frame(self, x, y):
+        if self._last_frame is None:
+            return None
+        frame_h, frame_w, _ = self._last_frame.shape
+        label_w = max(1, self.label.width())
+        label_h = max(1, self.label.height())
+
+        scale = min(label_w / frame_w, label_h / frame_h)
+        disp_w = int(frame_w * scale)
+        disp_h = int(frame_h * scale)
+        off_x = (label_w - disp_w) / 2
+        off_y = (label_h - disp_h) / 2
+
+        if x < off_x or y < off_y or x >= off_x + disp_w or y >= off_y + disp_h:
+            return None
+
+        fx = int((x - off_x) / scale)
+        fy = int((y - off_y) / scale)
+        return fx, fy
+
+    def _box_at_point(self, x, y):
+        for box in self._last_boxes:
+            if box["x1"] <= x <= box["x2"] and box["y1"] <= y <= box["y2"]:
+                return box
+        return None
 
     @pyqtSlot(str)
     def on_camera_error(self, msg: str):
@@ -239,8 +326,15 @@ class WebcamViewer(QWidget):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Webcam viewer")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index")
+    parser.add_argument("--fps", type=int, default=15, help="Target FPS")
+    args = parser.parse_args()
+
     app = QApplication(sys.argv)
-    w = WebcamViewer(camera_index=0, fps=30)
+    w = WebcamViewer(camera_index=args.camera, fps=args.fps)
     w.show()
     sys.exit(app.exec())
         
