@@ -1,9 +1,11 @@
 
+
+'''
 import sys
 import cv2
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBo
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBox
 
 
 
@@ -13,7 +15,6 @@ class CamViewer(QWidget):
         self.setWindowTitle("Webcam Stream - QTimer")
         self.camera_name = camera_name
         self.frame_interval_ms = int(1000 / max(1, fps))
-
 
 ## only main thread
 
@@ -95,7 +96,7 @@ if __name__ == "__main__":
     w = WebcamViewer(camera_index=0, fps=30)
     w.show()
     sys.exit(app.exec())
-
+'''
 
 # filename: webcam_qt_thread.py
 
@@ -104,7 +105,7 @@ import sys
 import cv2
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBox
+from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout
 
 
 class CameraWorker(QThread):
@@ -140,28 +141,58 @@ class CameraWorker(QThread):
         self.wait(1000)  # wait up to 1s for clean exit
 
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal(int, int)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            self.clicked.emit(int(pos.x()), int(pos.y()))
+        super().mousePressEvent(event)
+
+
 class WebcamViewer(QWidget):
     def __init__(self, camera_index: int = 0, fps: int = 30):
         super().__init__()
         self.setWindowTitle("Webcam Stream - QThread")
-        self.label = QLabel("Starting camera...")
+        self.label = ClickableLabel("Starting camera...")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setMinimumSize(640, 480)
+        self.label.clicked.connect(self.on_label_clicked)
         self.btn_toggle = QPushButton("Stop")
         self.btn_toggle.clicked.connect(self.toggle_stream)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.label)
-        layout.addWidget(self.btn_toggle)
-        self.setLayout(layout)
+        self.sidebar_title = QLabel("Clicked Pixel")
+        self.sidebar_title.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_coords = QLabel("x: -, y: -")
+        self.sidebar_coords.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_sample = QLabel("color: -")
+        self.sidebar_sample.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        sidebar = QVBoxLayout()
+        sidebar.addWidget(self.sidebar_title)
+        sidebar.addWidget(self.sidebar_coords)
+        sidebar.addWidget(self.sidebar_sample)
+        sidebar.addStretch(1)
+
+        main = QHBoxLayout()
+        main.addWidget(self.label, 1)
+        main.addLayout(sidebar)
+
+        root = QVBoxLayout()
+        root.addLayout(main)
+        root.addWidget(self.btn_toggle)
+        self.setLayout(root)
 
         self.worker = CameraWorker(camera_index=camera_index, fps=fps)
         self.worker.frameReady.connect(self.on_frame)
         self.worker.cameraError.connect(self.on_camera_error)
         self.worker.start()
+        self._last_frame = None
 
     @pyqtSlot(object)
     def on_frame(self, frame_bgr):
+        self._last_frame = frame_bgr
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
@@ -171,6 +202,20 @@ class WebcamViewer(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
         self.label.setPixmap(pix)
+
+    @pyqtSlot(int, int)
+    def on_label_clicked(self, x, y):
+        self.sidebar_coords.setText(f"x: {x}, y: {y}")
+        if self._last_frame is None:
+            self.sidebar_sample.setText("color: -")
+            return
+
+        h, w, _ = self._last_frame.shape
+        if 0 <= x < w and 0 <= y < h:
+            b, g, r = self._last_frame[y, x]
+            self.sidebar_sample.setText(f"color: r={int(r)}, g={int(g)}, b={int(b)}")
+        else:
+            self.sidebar_sample.setText("color: out of bounds")
 
     @pyqtSlot(str)
     def on_camera_error(self, msg: str):
