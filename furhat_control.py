@@ -62,20 +62,31 @@ class FurhatController:
         yaw, pitch, roll are in degrees.
         relative=True makes the pose relative to the current attention target.
         """
-        #if not self.can_move_now():
-        #    remaining = self.time_until_move()
-        #    raise RuntimeError(
-        #        f"Head movement rate-limited. Try again in {remaining:.3f}s."
-        #    )
+        if not self.can_move_now():
+            remaining = self.time_until_move()
+            raise RuntimeError(
+                f"Head movement rate-limited. Try again in {remaining:.3f}s."
+            )
 
-        await self.client.request_face_headpose(
-            yaw=yaw,
-            pitch=pitch,
-            roll=roll,
-            relative=relative,
-        )
-        #self._last_move_time = time.monotonic()
+
+        if relative:
+            await self.client.send_event({"type":"request.face.headpose",
+                                            "yaw":yaw, "pitch":pitch, "roll":roll,
+                                            "relative" : "true"})
+
+        else:
+
+            await self.client.send_event({"type":"request.face.headpose",
+                                            "yaw":yaw, "pitch":pitch, "roll":roll,
+                                            "relative" : "false"})
+
+        await asyncio.sleep(0.1)
+        self._last_move_time = time.monotonic()
         self._last_head_pose = HeadPose(yaw=yaw, pitch=pitch, roll=roll, relative=relative)
+        print(
+            f"Furhat head target: pitch={pitch:.3f}, yaw={yaw:.3f}, roll={roll:.3f}, "
+            f"relative={relative}"
+        )
 
     async def move_head_relative(self, yaw: float, pitch: float, roll: float) -> None:
         """

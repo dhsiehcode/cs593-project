@@ -54,10 +54,7 @@ class Mapper():
         """
 
         ## TODO, make it both directions.
-        #print((x - self.width / 2))
         yaw_angle = math.atan((x - self.width / 2) / self.focal_legnth_x)
-        print(yaw_angle)
-        print(math.degrees(yaw_angle))
         return yaw_angle
 
 
@@ -105,7 +102,9 @@ class Mapper():
         # get bbox proportion, scale down movements by scale
         #proportion = self.scale(bbox) 
         proportion = 1
-
+        print(
+            f"(Absolute) Furhat head target: pitch={raw_pitch:.3f}, yaw={raw_yaw:.3f}, roll=0, "
+        )
         return raw_pitch * proportion, raw_yaw * proportion, 0
     
     def get_relative_movement(self, x : int, y :int , bbox : Dict[str, int],
@@ -140,6 +139,9 @@ class Mapper():
             yaw = cur_yaw - raw_yaw
 
         #return pitch, yaw, 0
+        print(
+            f"(Relative) Furhat head target: pitch={pitch:.3f}, yaw={yaw:.3f}, roll=0, "
+        )
         return 0, yaw, 0
 
 

@@ -223,14 +223,16 @@ class WebcamViewer(QWidget):
             )
             self._ensure_mapper()
             if self.mapper is not None:
-                pitch, yaw, roll = self.mapper.get_relative_movement(fx, fy, hit)
+                #pitch, yaw, roll = self.mapper.get_relative_movement(fx, fy, hit)
+                pitch, yaw, roll = self.mapper.get_absolute_movement(fx, fy, hit)
                 self.sidebar_move.setText(
                     f"movement: pitch={pitch:.3f}, yaw={yaw:.3f}, roll={roll:.3f}"
                 )
                 if self.furhat is not None:
                     try:
                         fut = self.furhat.submit(
-                            self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+                            #self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+                            self.furhat.move_head_absolute(yaw=yaw, pitch=pitch, roll=roll)
                         )
                         fut.result()
                         self.sidebar_furhat_move.setText("furhat move: ok")
