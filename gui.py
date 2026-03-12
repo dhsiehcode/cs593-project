@@ -106,7 +106,8 @@ import cv2
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget, QMessageBox, QHBoxLayout
-from ultralytics import YOLO 
+from ultralytics import YOLO
+from mapping import Mapper
 
 
 class CameraWorker(QThread):
@@ -153,6 +154,10 @@ class ClickableLabel(QLabel):
 
 
 class WebcamViewer(QWidget):
+    DEFAULT_FOV_X = 90
+    DEFAULT_FOV_Y = 60
+    DEFAULT_CAM_TO_ROBOT = 0.5
+
     def __init__(self, camera_index: int = 0, fps: int = 15, confidence: float = 0.7):
         super().__init__()
         self.setWindowTitle("Webcam Stream - QThread")
@@ -162,6 +167,8 @@ class WebcamViewer(QWidget):
         self.label.clicked.connect(self.on_label_clicked)
         self.btn_toggle = QPushButton("Stop")
         self.btn_toggle.clicked.connect(self.toggle_stream)
+        self.btn_mode = QPushButton("Mode: Relative")
+        self.btn_mode.clicked.connect(self.toggle_mode)
 
         self.sidebar_title = QLabel("Clicked Pixel")
         self.sidebar_title.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -171,12 +178,18 @@ class WebcamViewer(QWidget):
         self.sidebar_sample.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.sidebar_box = QLabel("box: -")
         self.sidebar_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_move = QLabel("movement: -")
+        self.sidebar_move.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_mode = QLabel("mode: get_relative_movement")
+        self.sidebar_mode.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         sidebar = QVBoxLayout()
         sidebar.addWidget(self.sidebar_title)
         sidebar.addWidget(self.sidebar_coords)
         sidebar.addWidget(self.sidebar_sample)
         sidebar.addWidget(self.sidebar_box)
+        sidebar.addWidget(self.sidebar_move)
+        sidebar.addWidget(self.sidebar_mode)
         sidebar.addStretch(1)
 
         main = QHBoxLayout()
@@ -186,6 +199,7 @@ class WebcamViewer(QWidget):
         root = QVBoxLayout()
         root.addLayout(main)
         root.addWidget(self.btn_toggle)
+        root.addWidget(self.btn_mode)
         self.setLayout(root)
 
         self.worker = CameraWorker(camera_index=camera_index, fps=fps)
@@ -196,6 +210,8 @@ class WebcamViewer(QWidget):
         self._frame_count = 0
         self._last_boxes = []
         self.confidence = confidence
+        self.mapper = None
+        self.use_relative = True
         try:
             self.detector = YOLO("yolov8n.pt")
         except Exception as exc:
@@ -248,6 +264,7 @@ class WebcamViewer(QWidget):
             self.sidebar_coords.setText(f"x: {x}, y: {y}")
             self.sidebar_sample.setText("color: -")
             self.sidebar_box.setText("box: -")
+            self.sidebar_move.setText("movement: -")
             return
 
         mapped = self._map_label_to_frame(x, y)
@@ -256,6 +273,7 @@ class WebcamViewer(QWidget):
             self.sidebar_sample.setText("color: out of bounds")
             self.sidebar_title.setText("Clicked Pixel")
             self.sidebar_box.setText("box: -")
+            self.sidebar_move.setText("movement: -")
             return
 
         fx, fy = mapped
@@ -274,9 +292,19 @@ class WebcamViewer(QWidget):
             self.sidebar_box.setText(
                 f"box: id={hit['id']} [{hit['x1']},{hit['y1']}] - [{hit['x2']},{hit['y2']}]"
             )
+            self._ensure_mapper()
+            if self.mapper is not None:
+                if self.use_relative:
+                    pitch, yaw, roll = self.mapper.get_relative_movement(fx, fy, hit)
+                else:
+                    pitch, yaw, roll = self.mapper.get_absolute_movement(fx, fy, hit)
+                self.sidebar_move.setText(
+                    f"movement: pitch={pitch:.3f}, yaw={yaw:.3f}, roll={roll:.3f}"
+                )
         else:
             self.sidebar_title.setText("Clicked Pixel")
             self.sidebar_box.setText("box: -")
+            self.sidebar_move.setText("movement: -")
 
     def _map_label_to_frame(self, x, y):
         if self._last_frame is None:
@@ -304,6 +332,18 @@ class WebcamViewer(QWidget):
                 return box
         return None
 
+    def _ensure_mapper(self):
+        if self.mapper is not None or self._last_frame is None:
+            return
+        h, w, _ = self._last_frame.shape
+        self.mapper = Mapper(
+            height=h,
+            width=w,
+            fov_x=self.DEFAULT_FOV_X,
+            fov_y=self.DEFAULT_FOV_Y,
+            cam_to_robot=self.DEFAULT_CAM_TO_ROBOT,
+        )
+
     @pyqtSlot(str)
     def on_camera_error(self, msg: str):
         QMessageBox.critical(self, "Camera Error", msg)
@@ -318,6 +358,13 @@ class WebcamViewer(QWidget):
             self.worker.cameraError.connect(self.on_camera_error)
             self.worker.start()
             self.btn_toggle.setText("Stop")
+
+    def toggle_mode(self):
+        self.use_relative = not self.use_relative
+        mode = "Relative" if self.use_relative else "Absolute"
+        self.btn_mode.setText(f"Mode: {mode}")
+        label = "get_relative_movement" if self.use_relative else "get_absolute_movement"
+        self.sidebar_mode.setText(f"mode: {label}")
 
     def closeEvent(self, event):
         if self.worker.isRunning():
