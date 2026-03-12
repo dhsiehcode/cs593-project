@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
+import asyncio
+import threading
 from typing import Optional, Tuple
 
-from furhat_realtime_api import FurhatClient
+from furhat_realtime_api import AsyncFurhatClient
 
 
 @dataclass
@@ -24,16 +28,28 @@ class FurhatController:
 
     def __init__(self, ip_address: str):
         self.ip_address = ip_address
-        self.client = FurhatClient(ip_address)
+        self.client = AsyncFurhatClient(ip_address)
         self._last_head_pose: Optional[HeadPose] = None
+        self._last_move_time: Optional[float] = None
+        self._min_move_interval_s = 0.5
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, name="furhat-async-loop", daemon=True)
+        self._thread.start()
 
-    def connect(self) -> None:
-        self.client.connect()
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
 
-    def disconnect(self) -> None:
-        self.client.disconnect()
+    def submit(self, coro: asyncio.Future) -> asyncio.Future:
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
-    def set_head_pose(
+    async def connect(self) -> None:
+        await self.client.connect()
+
+    async def disconnect(self) -> None:
+        await self.client.disconnect()
+
+    async def set_head_pose(
         self,
         yaw: float,
         pitch: float,
@@ -46,25 +62,49 @@ class FurhatController:
         yaw, pitch, roll are in degrees.
         relative=True makes the pose relative to the current attention target.
         """
-        self.client.request_face_headpose(
+        #if not self.can_move_now():
+        #    remaining = self.time_until_move()
+        #    raise RuntimeError(
+        #        f"Head movement rate-limited. Try again in {remaining:.3f}s."
+        #    )
+
+        await self.client.request_face_headpose(
             yaw=yaw,
             pitch=pitch,
             roll=roll,
             relative=relative,
         )
+        #self._last_move_time = time.monotonic()
         self._last_head_pose = HeadPose(yaw=yaw, pitch=pitch, roll=roll, relative=relative)
 
-    def move_head_relative(self, yaw: float, pitch: float, roll: float) -> None:
+    async def move_head_relative(self, yaw: float, pitch: float, roll: float) -> None:
         """
-        Move head relative to the current position (degrees).
+        Move head relative to the current position (input in radians).
         """
-        self.set_head_pose(yaw=yaw, pitch=pitch, roll=roll, relative=True)
+        #asyncio.run(self.set_head_pose(
+        #    yaw=math.degrees(yaw),
+        #    pitch=math.degrees(pitch),
+        #    roll=math.degrees(roll),
+        #    relative=True,
+        #))
 
-    def move_head_absolute(self, yaw: float, pitch: float, roll: float) -> None:
+        await self.set_head_pose(
+            yaw=math.degrees(yaw),
+            pitch=math.degrees(pitch),
+            roll=math.degrees(roll),
+            relative=True,
+        )
+
+    async def move_head_absolute(self, yaw: float, pitch: float, roll: float) -> None:
         """
-        Move head to an absolute position (degrees).
+        Move head to an absolute position (input in radians).
         """
-        self.set_head_pose(yaw=yaw, pitch=pitch, roll=roll, relative=False)
+        await (self.set_head_pose(
+            yaw=math.degrees(yaw),
+            pitch=math.degrees(pitch),
+            roll=math.degrees(roll),
+            relative=False,
+        ))
 
     def get_head_pose(self) -> Optional[HeadPose]:
         """
@@ -72,11 +112,43 @@ class FurhatController:
         """
         return self._last_head_pose
 
+    def can_move_now(self) -> bool:
+        if self._last_move_time is None:
+            return True
+        return (time.monotonic() - self._last_move_time) >= self._min_move_interval_s
+
+    def time_until_move(self) -> float:
+        if self._last_move_time is None:
+            return 0.0
+        remaining = self._min_move_interval_s - (time.monotonic() - self._last_move_time)
+        return max(0.0, remaining)
+
+    def get_head_pose_from_robot(self) -> Optional[HeadPose]:
+        """
+        Attempt to fetch the current head pose from the robot.
+
+        Note: The furhat-realtime-api (per PyPI docs) does not expose a direct
+        "get head pose" request. This method currently cannot query live pose
+        and will raise to make the limitation explicit.
+        """
+        raise NotImplementedError(
+            "furhat-realtime-api does not provide a head pose getter; "
+            "use get_head_pose() for the last commanded pose instead."
+        )
+
+
+def _run_async(controller: FurhatController, coro):
+    return controller.submit(coro).result()
+
 
 def connect_furhat(ip_address: str) -> FurhatController:
     controller = FurhatController(ip_address)
-    controller.connect()
+    _run_async(controller, controller.connect())
     return controller
+
+
+def disconnect_furhat(controller: FurhatController) -> None:
+    _run_async(controller, controller.disconnect())
 
 
 def change_head_movement(
@@ -86,7 +158,7 @@ def change_head_movement(
     roll: float,
     relative: bool = False,
 ) -> None:
-    controller.set_head_pose(yaw=yaw, pitch=pitch, roll=roll, relative=relative)
+    _run_async(controller, controller.set_head_pose(yaw=yaw, pitch=pitch, roll=roll, relative=relative))
 
 
 def move_head_relative(
@@ -95,7 +167,7 @@ def move_head_relative(
     pitch: float,
     roll: float,
 ) -> None:
-    controller.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+    _run_async(controller, controller.move_head_relative(yaw=yaw, pitch=pitch, roll=roll))
 
 
 def move_head_absolute(
@@ -104,7 +176,7 @@ def move_head_absolute(
     pitch: float,
     roll: float,
 ) -> None:
-    controller.move_head_absolute(yaw=yaw, pitch=pitch, roll=roll)
+    _run_async(controller, controller.move_head_absolute(yaw=yaw, pitch=pitch, roll=roll))
 
 
 def get_current_head_position(

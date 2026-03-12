@@ -17,12 +17,7 @@ from PyQt6.QtWidgets import (
 )
 from ultralytics import YOLO
 from mapping import Mapper
-from furhat_control import (
-    connect_furhat,
-    move_head_relative,
-    move_head_absolute,
-    FurhatController,
-)
+from furhat_control import FurhatController
 
 
 class CameraWorker(QThread):
@@ -82,9 +77,6 @@ class WebcamViewer(QWidget):
         self.label.clicked.connect(self.on_label_clicked)
         self.btn_toggle = QPushButton("Stop")
         self.btn_toggle.clicked.connect(self.toggle_stream)
-        self.btn_mode = QPushButton("Mode: Relative")
-        self.btn_mode.clicked.connect(self.toggle_mode)
-
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("Furhat IP (e.g., 192.168.1.50)")
         self.btn_connect = QPushButton("Connect Furhat")
@@ -101,10 +93,14 @@ class WebcamViewer(QWidget):
         self.sidebar_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.sidebar_move = QLabel("movement: -")
         self.sidebar_move.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.sidebar_mode = QLabel("mode: get_relative_movement")
-        self.sidebar_mode.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.sidebar_furhat = QLabel("furhat: disconnected")
         self.sidebar_furhat.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_furhat_move = QLabel("furhat move: -")
+        self.sidebar_furhat_move.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_furhat_pose = QLabel("furhat pose: -")
+        self.sidebar_furhat_pose.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.sidebar_furhat_can_move = QLabel("furhat can move: -")
+        self.sidebar_furhat_can_move.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         sidebar = QVBoxLayout()
         sidebar.addWidget(self.sidebar_title)
@@ -112,18 +108,23 @@ class WebcamViewer(QWidget):
         sidebar.addWidget(self.sidebar_sample)
         sidebar.addWidget(self.sidebar_box)
         sidebar.addWidget(self.sidebar_move)
-        sidebar.addWidget(self.sidebar_mode)
         sidebar.addWidget(self.sidebar_furhat)
+        sidebar.addWidget(self.sidebar_furhat_move)
+        sidebar.addWidget(self.sidebar_furhat_pose)
+        sidebar.addWidget(self.sidebar_furhat_can_move)
         sidebar.addStretch(1)
+
+        sidebar_widget = QWidget()
+        sidebar_widget.setLayout(sidebar)
+        sidebar_widget.setMinimumWidth(320)
 
         main = QHBoxLayout()
         main.addWidget(self.label, 1)
-        main.addLayout(sidebar)
+        main.addWidget(sidebar_widget)
 
         root = QVBoxLayout()
         root.addLayout(main)
         root.addWidget(self.btn_toggle)
-        root.addWidget(self.btn_mode)
         root.addWidget(self.ip_input)
         root.addWidget(self.btn_connect)
         root.addWidget(self.lbl_furhat_status)
@@ -138,7 +139,6 @@ class WebcamViewer(QWidget):
         self._last_boxes = []
         self.confidence = confidence
         self.mapper = None
-        self.use_relative = True
         self.furhat: FurhatController | None = None
         try:
             self.detector = YOLO("yolov8n.pt")
@@ -151,6 +151,7 @@ class WebcamViewer(QWidget):
     def on_frame(self, frame_bgr):
         self._last_frame = frame_bgr
         self._frame_count += 1
+        self._update_furhat_can_move()
 
         if self.detector is not None and self._frame_count % 5 == 0:
             results = self.detector(frame_bgr, conf = self.confidence, verbose=False)
@@ -222,18 +223,28 @@ class WebcamViewer(QWidget):
             )
             self._ensure_mapper()
             if self.mapper is not None:
-                if self.use_relative:
-                    pitch, yaw, roll = self.mapper.get_relative_movement(fx, fy, hit)
-                else:
-                    pitch, yaw, roll = self.mapper.get_absolute_movement(fx, fy, hit)
+                pitch, yaw, roll = self.mapper.get_relative_movement(fx, fy, hit)
                 self.sidebar_move.setText(
                     f"movement: pitch={pitch:.3f}, yaw={yaw:.3f}, roll={roll:.3f}"
                 )
                 if self.furhat is not None:
-                    if self.use_relative:
-                        move_head_relative(self.furhat, yaw=yaw, pitch=pitch, roll=roll)
-                    else:
-                        move_head_absolute(self.furhat, yaw=yaw, pitch=pitch, roll=roll)
+                    try:
+                        fut = self.furhat.submit(
+                            self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+                        )
+                        fut.result()
+                        self.sidebar_furhat_move.setText("furhat move: ok")
+                        pose = self.furhat.get_head_pose()
+                        if pose is None:
+                            self.sidebar_furhat_pose.setText("furhat pose: -")
+                        else:
+                            self.sidebar_furhat_pose.setText(
+                                f"furhat pose: pitch={pose.pitch:.3f}, yaw={pose.yaw:.3f}, roll={pose.roll:.3f}"
+                            )
+                    except Exception as exc:
+                        self.sidebar_furhat_move.setText(f"furhat move: failed ({exc})")
+                        self.sidebar_furhat_pose.setText("furhat pose: -")
+                        self._update_furhat_can_move()
         else:
             self.sidebar_title.setText("Clicked Pixel")
             self.sidebar_box.setText("box: -")
@@ -292,13 +303,6 @@ class WebcamViewer(QWidget):
             self.worker.start()
             self.btn_toggle.setText("Stop")
 
-    def toggle_mode(self):
-        self.use_relative = not self.use_relative
-        mode = "Relative" if self.use_relative else "Absolute"
-        self.btn_mode.setText(f"Mode: {mode}")
-        label = "get_relative_movement" if self.use_relative else "get_absolute_movement"
-        self.sidebar_mode.setText(f"mode: {label}")
-
     def connect_furhat(self):
         ip = self.ip_input.text().strip()
         if not ip:
@@ -306,14 +310,19 @@ class WebcamViewer(QWidget):
             return
         try:
             if self.furhat is not None:
-                self.furhat.disconnect()
-            self.furhat = connect_furhat(ip)
+                fut = self.furhat.submit(self.furhat.disconnect())
+                fut.result()
+            self.furhat = FurhatController(ip)
+            fut = self.furhat.submit(self.furhat.connect())
+            fut.result()
             self.lbl_furhat_status.setText(f"Furhat: connected to {ip}")
             self.sidebar_furhat.setText(f"furhat: connected to {ip}")
+            self._update_furhat_can_move()
         except Exception as exc:
             self.furhat = None
             self.lbl_furhat_status.setText("Furhat: disconnected")
             self.sidebar_furhat.setText("furhat: disconnected")
+            self.sidebar_furhat_can_move.setText("furhat can move: -")
             QMessageBox.critical(self, "Furhat Connection Error", str(exc))
 
     def closeEvent(self, event):
@@ -321,10 +330,23 @@ class WebcamViewer(QWidget):
             self.worker.stop()
         if self.furhat is not None:
             try:
-                self.furhat.disconnect()
+                fut = self.furhat.submit(self.furhat.disconnect())
+                fut.result()
             except Exception:
                 pass
         event.accept()
+
+    def _update_furhat_can_move(self):
+        if self.furhat is None:
+            self.sidebar_furhat_can_move.setText("furhat can move: -")
+            return
+        if self.furhat.can_move_now():
+            self.sidebar_furhat_can_move.setText("furhat can move: yes")
+        else:
+            remaining = self.furhat.time_until_move()
+            self.sidebar_furhat_can_move.setText(
+                f"furhat can move: no ({remaining:.2f}s)"
+            )
 
 
 if __name__ == "__main__":
@@ -340,3 +362,4 @@ if __name__ == "__main__":
     w.show()
     sys.exit(app.exec())
         
+    ## default furhat for HAILabRouter4: 192.168.0.199

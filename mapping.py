@@ -53,8 +53,11 @@ class Mapper():
             yaw_angle: angle of yaw in radians
         """
 
+        ## TODO, make it both directions.
+        #print((x - self.width / 2))
         yaw_angle = math.atan((x - self.width / 2) / self.focal_legnth_x)
-
+        print(yaw_angle)
+        print(math.degrees(yaw_angle))
         return yaw_angle
 
 
@@ -77,7 +80,7 @@ class Mapper():
         pitch_camera = math.atan((y - self.height / 2) / self.focal_legnth_y)
         distance_to_target = self.cam_height / math.tan(pitch_camera)
         robot_pitch = math.atan(self.robot_height / distance_to_target)
-        return robot_pitch
+        return robot_pitch * -1 ## need to reverse since up and down calculations are reverse
     
 
     def get_absolute_movement(self, x : int, y :int , bbox : Dict[str, int]) -> tuple[float, float, float]:
@@ -100,7 +103,8 @@ class Mapper():
         raw_pitch = self.get_pitch(x, y)
         
         # get bbox proportion, scale down movements by scale
-        proportion = self.scale(bbox) 
+        #proportion = self.scale(bbox) 
+        proportion = 1
 
         return raw_pitch * proportion, raw_yaw * proportion, 0
     
@@ -135,7 +139,8 @@ class Mapper():
         else:
             yaw = cur_yaw - raw_yaw
 
-        return pitch, yaw, 0
+        #return pitch, yaw, 0
+        return 0, yaw, 0
 
 
     def scale(self, bbox : Dict[str, int]):
