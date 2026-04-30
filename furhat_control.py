@@ -70,9 +70,11 @@ class FurhatController:
 
 
         if relative:
-            await self.client.send_event({"type":"request.face.headpose",
-                                            "yaw":yaw, "pitch":pitch, "roll":roll,
-                                            "relative" : "true"})
+            #await self.client.send_event({"type":"request.face.headpose",
+            #                                "yaw":yaw, "pitch":pitch, "roll":roll,
+            #                                "relative" : "true"})
+            await self.client.request_face_headpose(yaw, pitch, roll, relative=True)
+            print("request_face_headpose")
 
         else:
 
@@ -98,6 +100,8 @@ class FurhatController:
         #    roll=math.degrees(roll),
         #    relative=True,
         #))
+
+        print(f"furhat relative head movement to yaw {yaw}, pitch {pitch}, roll {roll}")
 
         await self.set_head_pose(
             yaw=math.degrees(yaw),

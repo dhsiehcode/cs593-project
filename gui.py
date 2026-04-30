@@ -3,7 +3,7 @@
 ## threaded
 import sys
 import cv2
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -66,7 +66,7 @@ class ClickableLabel(QLabel):
 class WebcamViewer(QWidget):
     DEFAULT_FOV_X = 90
     DEFAULT_FOV_Y = 60
-    DEFAULT_CAM_TO_ROBOT = 0.5
+    DEFAULT_CAM_TO_ROBOT = 0.3
 
     def __init__(self, camera_index: int = 0, fps: int = 15, confidence: float = 0.7):
         super().__init__()
@@ -77,6 +77,9 @@ class WebcamViewer(QWidget):
         self.label.clicked.connect(self.on_label_clicked)
         self.btn_toggle = QPushButton("Stop")
         self.btn_toggle.clicked.connect(self.toggle_stream)
+        self.btn_tracking = QPushButton("Enable Tracking")
+        self.btn_tracking.setCheckable(True)
+        self.btn_tracking.clicked.connect(self.toggle_tracking)
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("Furhat IP (e.g., 192.168.1.50)")
         self.btn_connect = QPushButton("Connect Furhat")
@@ -125,6 +128,7 @@ class WebcamViewer(QWidget):
         root = QVBoxLayout()
         root.addLayout(main)
         root.addWidget(self.btn_toggle)
+        root.addWidget(self.btn_tracking)
         root.addWidget(self.ip_input)
         root.addWidget(self.btn_connect)
         root.addWidget(self.lbl_furhat_status)
@@ -140,6 +144,10 @@ class WebcamViewer(QWidget):
         self.confidence = confidence
         self.mapper = None
         self.furhat: FurhatController | None = None
+        self._tracked_face_center: tuple[int, int] | None = None
+        self._tracking_timer = QTimer(self)
+        self._tracking_timer.setInterval(500)
+        self._tracking_timer.timeout.connect(self._track_face)
         try:
             self.detector = YOLO("yolov8n.pt")
         except Exception as exc:
@@ -163,16 +171,25 @@ class WebcamViewer(QWidget):
             self._last_boxes = boxes
 
         display_frame = frame_bgr.copy()
+        tracked_id = None
+        if self._tracked_face_center is not None and self._last_boxes:
+            tx, ty = self._tracked_face_center
+            tracked_id = min(
+                self._last_boxes,
+                key=lambda b: (((b["x1"] + b["x2"]) // 2 - tx) ** 2 +
+                               ((b["y1"] + b["y2"]) // 2 - ty) ** 2),
+            )["id"]
         for box in self._last_boxes:
             x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            color = (0, 165, 255) if box["id"] == tracked_id else (0, 255, 0)
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
                 display_frame,
                 f"ID {box['id']}",
                 (x1, max(0, y1 - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0, 255, 0),
+                color,
                 1,
                 cv2.LINE_AA,
             )
@@ -217,7 +234,12 @@ class WebcamViewer(QWidget):
 
         hit = self._box_at_point(fx, fy)
         if hit is not None:
-            self.sidebar_title.setText("Clicked Pixel (IN FACE)")
+            cx = (hit["x1"] + hit["x2"]) // 2
+            cy = (hit["y1"] + hit["y2"]) // 2
+            self._tracked_face_center = (cx, cy)
+            if self.btn_tracking.isChecked() and not self._tracking_timer.isActive():
+                self._tracking_timer.start()
+            self.sidebar_title.setText("Clicked Pixel (IN FACE, tracking)")
             self.sidebar_box.setText(
                 f"box: id={hit['id']} [{hit['x1']},{hit['y1']}] - [{hit['x2']},{hit['y2']}]"
             )
@@ -231,8 +253,8 @@ class WebcamViewer(QWidget):
                 if self.furhat is not None:
                     try:
                         fut = self.furhat.submit(
-                            #self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
-                            self.furhat.move_head_absolute(yaw=yaw, pitch=pitch, roll=roll)
+                            self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+                            #self.furhat.move_head_absolute(yaw=yaw, pitch=pitch, roll=roll)
                         )
                         fut.result()
                         self.sidebar_furhat_move.setText("furhat move: ok")
@@ -248,9 +270,53 @@ class WebcamViewer(QWidget):
                         self.sidebar_furhat_pose.setText("furhat pose: -")
                         self._update_furhat_can_move()
         else:
+            self._tracked_face_center = None
+            self._tracking_timer.stop()
             self.sidebar_title.setText("Clicked Pixel")
             self.sidebar_box.setText("box: -")
             self.sidebar_move.setText("movement: -")
+
+    def toggle_tracking(self, checked: bool):
+        if checked:
+            self.btn_tracking.setText("Disable Tracking")
+            if self._tracked_face_center is not None and not self._tracking_timer.isActive():
+                self._tracking_timer.start()
+        else:
+            self.btn_tracking.setText("Enable Tracking")
+            self._tracking_timer.stop()
+            self._tracked_face_center = None
+            self.sidebar_title.setText("Clicked Pixel")
+
+    def _track_face(self):
+        if self._tracked_face_center is None or self.furhat is None or self.mapper is None:
+            return
+        if not self._last_boxes:
+            return
+        tx, ty = self._tracked_face_center
+        best = min(
+            self._last_boxes,
+            key=lambda b: (((b["x1"] + b["x2"]) // 2 - tx) ** 2 +
+                           ((b["y1"] + b["y2"]) // 2 - ty) ** 2),
+        )
+        cx = (best["x1"] + best["x2"]) // 2
+        cy = (best["y1"] + best["y2"]) // 2
+        self._tracked_face_center = (cx, cy)
+        self._ensure_mapper()
+        pitch, yaw, roll = self.mapper.get_absolute_movement(cx, cy, best)
+        self.sidebar_move.setText(f"movement: pitch={pitch:.3f}, yaw={yaw:.3f}, roll={roll:.3f}")
+        try:
+            fut = self.furhat.submit(
+                self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+            )
+            fut.result()
+            self.sidebar_furhat_move.setText("furhat move: ok (tracking)")
+            pose = self.furhat.get_head_pose()
+            if pose is not None:
+                self.sidebar_furhat_pose.setText(
+                    f"furhat pose: pitch={pose.pitch:.3f}, yaw={pose.yaw:.3f}, roll={pose.roll:.3f}"
+                )
+        except Exception as exc:
+            self.sidebar_furhat_move.setText(f"furhat move: failed ({exc})")
 
     def _map_label_to_frame(self, x, y):
         if self._last_frame is None:
@@ -328,6 +394,7 @@ class WebcamViewer(QWidget):
             QMessageBox.critical(self, "Furhat Connection Error", str(exc))
 
     def closeEvent(self, event):
+        self._tracking_timer.stop()
         if self.worker.isRunning():
             self.worker.stop()
         if self.furhat is not None:

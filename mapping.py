@@ -74,9 +74,12 @@ class Mapper():
             robot_pitch: angle of pitch in radians
         """
         ## pitch angle relative to camera's axis
-        pitch_camera = math.atan((y - self.height / 2) / self.focal_legnth_y)
-        distance_to_target = self.cam_height / math.tan(pitch_camera)
-        robot_pitch = math.atan(self.robot_height / distance_to_target)
+        try:
+            pitch_camera = math.atan((y - self.height / 2) / self.focal_legnth_y)
+            distance_to_target = self.cam_height / math.tan(pitch_camera)
+            robot_pitch = math.atan(self.robot_height / distance_to_target)
+        except ZeroDivisionError:
+            return 1 * -1 ## assume it is high 
         return robot_pitch * -1 ## need to reverse since up and down calculations are reverse
     
 
@@ -101,11 +104,12 @@ class Mapper():
         
         # get bbox proportion, scale down movements by scale
         #proportion = self.scale(bbox) 
-        proportion = 1
+        pitch_proportion = 0.6
+        yaw_proportion = 1
         print(
             f"(Absolute) Furhat head target: pitch={raw_pitch:.3f}, yaw={raw_yaw:.3f}, roll=0, "
         )
-        return raw_pitch * proportion, raw_yaw * proportion, 0
+        return raw_pitch * pitch_proportion, -1 * raw_yaw * yaw_proportion, 0
     
     def get_relative_movement(self, x : int, y :int , bbox : Dict[str, int],
                               cur_pitch : int = 0, cur_yaw : int = 0, cur_roll : int = 0) -> tuple[float, float, float]:
