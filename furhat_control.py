@@ -7,7 +7,7 @@ import asyncio
 import threading
 from typing import Optional, Tuple
 
-from furhat_realtime_api import AsyncFurhatClient
+from furhat_realtime_api import AsyncFurhatClient, Events, FurhatClient
 
 
 @dataclass
@@ -28,7 +28,7 @@ class FurhatController:
 
     def __init__(self, ip_address: str):
         self.ip_address = ip_address
-        self.client = AsyncFurhatClient(ip_address)
+        self.client = FurhatClient(ip_address)
         self._last_head_pose: Optional[HeadPose] = None
         self._last_move_time: Optional[float] = None
         self._min_move_interval_s = 0.5
@@ -44,10 +44,12 @@ class FurhatController:
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     async def connect(self) -> None:
-        await self.client.connect()
+        #await self.client.connect()
+        self.client.connect()
 
     async def disconnect(self) -> None:
-        await self.client.disconnect()
+        #await self.client.disconnect()
+        self.client.disconnect()
 
     async def set_head_pose(
         self,
@@ -73,12 +75,12 @@ class FurhatController:
             #await self.client.send_event({"type":"request.face.headpose",
             #                                "yaw":yaw, "pitch":pitch, "roll":roll,
             #                                "relative" : "true"})
-            await self.client.request_face_headpose(yaw, pitch, roll, relative=True)
-            print("request_face_headpose")
+            await self.client.async_client.request_face_headpose(yaw, pitch, roll, relative=True)
+            #print("request_face_headpose")
 
         else:
 
-            await self.client.send_event({"type":"request.face.headpose",
+            await self.client.async_client.send_event({"type":"request.face.headpose",
                                             "yaw":yaw, "pitch":pitch, "roll":roll,
                                             "relative" : "false"})
 
@@ -121,6 +123,22 @@ class FurhatController:
             relative=False,
         ))
 
+    async def greet_and_name(self) -> str:
+        self.client.request_speak_text(
+            "Hello! What is your name?", wait=True, abort=True
+        )
+        self.client.request_led_set("blue")
+
+        user_utt = self.client.request_listen_start(
+            no_speech_timeout=5.0,
+            end_speech_timeout=1.0,
+        )
+        self.client.request_led_set("white")
+        text = user_utt
+
+        #text = result_text[0] if result_text else ""
+        return text if text else "unknown"
+
     def get_head_pose(self) -> Optional[HeadPose]:
         """
         Returns the last commanded head pose, or None if never set.
@@ -150,6 +168,7 @@ class FurhatController:
             "furhat-realtime-api does not provide a head pose getter; "
             "use get_head_pose() for the last commanded pose instead."
         )
+
 
 
 def _run_async(controller: FurhatController, coro):

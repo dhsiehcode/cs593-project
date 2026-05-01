@@ -2,6 +2,7 @@
 
 ## threaded
 import sys
+import time
 import cv2
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
@@ -18,6 +19,10 @@ from PyQt6.QtWidgets import (
 from ultralytics import YOLO
 from mapping import Mapper
 from furhat_control import FurhatController
+from names import Face, KnownFaces
+from gesture_detector import GestureDetector
+
+_GESTURE_HYSTERESIS_S = 2.0
 
 
 class CameraWorker(QThread):
@@ -80,6 +85,12 @@ class WebcamViewer(QWidget):
         self.btn_tracking = QPushButton("Enable Tracking")
         self.btn_tracking.setCheckable(True)
         self.btn_tracking.clicked.connect(self.toggle_tracking)
+        self.btn_greeting = QPushButton("Enable Greeting")
+        self.btn_greeting.setCheckable(True)
+        self.btn_greeting.clicked.connect(self.toggle_greeting)
+        self.btn_gesture = QPushButton("Enable Gesture Attention")
+        self.btn_gesture.setCheckable(True)
+        self.btn_gesture.clicked.connect(self.toggle_gesture)
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("Furhat IP (e.g., 192.168.1.50)")
         self.btn_connect = QPushButton("Connect Furhat")
@@ -112,8 +123,8 @@ class WebcamViewer(QWidget):
         sidebar.addWidget(self.sidebar_box)
         sidebar.addWidget(self.sidebar_move)
         sidebar.addWidget(self.sidebar_furhat)
-        sidebar.addWidget(self.sidebar_furhat_move)
-        sidebar.addWidget(self.sidebar_furhat_pose)
+        #sidebar.addWidget(self.sidebar_furhat_move)
+        #sidebar.addWidget(self.sidebar_furhat_pose)
         sidebar.addWidget(self.sidebar_furhat_can_move)
         sidebar.addStretch(1)
 
@@ -121,14 +132,29 @@ class WebcamViewer(QWidget):
         sidebar_widget.setLayout(sidebar)
         sidebar_widget.setMinimumWidth(320)
 
+
+        self.left_sidebar_title = QLabel("Controls")
+        self.left_sidebar_title.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        left_sidebar = QVBoxLayout()
+        left_sidebar.addWidget(self.left_sidebar_title)
+        left_sidebar.addWidget(self.btn_tracking)
+        left_sidebar.addWidget(self.btn_greeting)
+        left_sidebar.addWidget(self.btn_gesture)
+        left_sidebar.addStretch(1)
+
+        left_sidebar_widget = QWidget()
+        left_sidebar_widget.setLayout(left_sidebar)
+        left_sidebar_widget.setMinimumWidth(160)
+
         main = QHBoxLayout()
+        main.addWidget(left_sidebar_widget)
         main.addWidget(self.label, 1)
         main.addWidget(sidebar_widget)
 
         root = QVBoxLayout()
         root.addLayout(main)
         root.addWidget(self.btn_toggle)
-        root.addWidget(self.btn_tracking)
         root.addWidget(self.ip_input)
         root.addWidget(self.btn_connect)
         root.addWidget(self.lbl_furhat_status)
@@ -145,15 +171,21 @@ class WebcamViewer(QWidget):
         self.mapper = None
         self.furhat: FurhatController | None = None
         self._tracked_face_center: tuple[int, int] | None = None
+        self._known_faces: KnownFaces = KnownFaces()
+        self._greeting_enabled = False
+        self._gesture_mode = False
+        self._gesture_last_id: int | None = None
+        self._gesture_last_switch: float = 0.0
+        self._gesture_detector = GestureDetector()
         self._tracking_timer = QTimer(self)
         self._tracking_timer.setInterval(500)
         self._tracking_timer.timeout.connect(self._track_face)
         try:
-            self.detector = YOLO("yolov8n.pt")
+            self.detector = YOLO("yolov8n-pose.pt")
         except Exception as exc:
             print(exc)
             self.detector = None
-            QMessageBox.warning(self, "Model Load Error", f"Could not load yolov8n-face.pt: {exc}")
+            QMessageBox.warning(self, "Model Load Error", f"Could not load yolov8n-pose.pt: {exc}")
 
     @pyqtSlot(object)
     def on_frame(self, frame_bgr):
@@ -168,7 +200,48 @@ class WebcamViewer(QWidget):
                 for idx, b in enumerate(results[0].boxes.xyxy.cpu().tolist(), start=1):
                     x1, y1, x2, y2 = map(int, b)
                     boxes.append({"id": idx, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                    if self._greeting_enabled and self._known_faces.get_by_id(idx) is None:
+                        face = Face(
+                            id=idx,
+                            bbox=[x1, y1, x2, y2],
+                            face_center=((x1 + x2) // 2, (y1 + y2) // 2),
+                        )
+                        self._known_faces.add(face)
+                        if self.furhat is not None:
+                            self.furhat.submit(self._greet_face(face))
             self._last_boxes = boxes
+
+            if self._gesture_mode:
+                self._gesture_detector.update_scores(results, self._known_faces, frame_bgr.shape[0])
+                salient: Face | None = self._gesture_detector.most_salient(self._known_faces)
+
+                if salient is not None:
+                    now = time.monotonic()
+                    if (salient.id != self._gesture_last_id and
+                            now - self._gesture_last_switch < _GESTURE_HYSTERESIS_S):
+                        salient = None
+                    else:
+                        self._gesture_last_id = salient.id
+                        self._gesture_last_switch = now
+
+                if salient is not None:
+                    cx, cy = salient.face_center
+                    self._tracked_face_center = (cx, cy)
+                    self.sidebar_title.setText(
+                        f"Gesture → {salient.name} ID {salient.id} "
+                        f"(score {salient.gesture_score:.2f})"
+                    )
+                    self._ensure_mapper()
+                    if self.furhat is not None and self.mapper is not None and self.furhat.can_move_now():
+                        bbox_dict = {"x1": salient.bbox[0], "y1": salient.bbox[1],
+                                     "x2": salient.bbox[2], "y2": salient.bbox[3]}
+                        pitch, yaw, roll = self.mapper.get_absolute_movement(cx, cy, bbox_dict)
+                        fut = self.furhat.submit(
+                            self.furhat.move_head_relative(yaw=yaw, pitch=pitch, roll=roll)
+                        )
+                        fut.result()
+                else:
+                    self.sidebar_title.setText("Gesture: no salient target")
 
         display_frame = frame_bgr.copy()
         tracked_id = None
@@ -183,9 +256,16 @@ class WebcamViewer(QWidget):
             x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
             color = (0, 165, 255) if box["id"] == tracked_id else (0, 255, 0)
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+            known = self._known_faces.get_by_id(box["id"])
+            if known is None or known.name == "unknown":
+                box_label = f"ID {box['id']}"
+            elif known.name in ("-", "greeting"):
+                box_label = "..."
+            else:
+                box_label = known.name
             cv2.putText(
                 display_frame,
-                f"ID {box['id']}",
+                box_label,
                 (x1, max(0, y1 - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -193,6 +273,19 @@ class WebcamViewer(QWidget):
                 1,
                 cv2.LINE_AA,
             )
+            if self._gesture_mode:
+                face = self._known_faces.get_by_id(box["id"])
+                if face is not None and face.gesture_score >= GestureDetector.RAISED_HAND_THRESHOLD:
+                    cv2.putText(
+                        display_frame,
+                        f"HAND ({face.gesture_score:.2f})",
+                        (x1, max(0, y1 - 22)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
         rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -287,6 +380,23 @@ class WebcamViewer(QWidget):
             self._tracked_face_center = None
             self.sidebar_title.setText("Clicked Pixel")
 
+    def toggle_greeting(self, checked: bool):
+        self._greeting_enabled = checked
+        if checked:
+            self.btn_greeting.setText("Disable Greeting")
+        else:
+            self.btn_greeting.setText("Enable Greeting")
+
+    def toggle_gesture(self, checked: bool):
+        self._gesture_mode = checked
+        self.btn_gesture.setText(
+            "Disable Gesture Attention" if checked else "Enable Gesture Attention"
+        )
+        if not checked:
+            for face in self._known_faces.faces:
+                face.gesture_score = 0.0
+            self.sidebar_title.setText("Clicked Pixel")
+
     def _track_face(self):
         if self._tracked_face_center is None or self.furhat is None or self.mapper is None:
             return
@@ -343,6 +453,10 @@ class WebcamViewer(QWidget):
             if box["x1"] <= x <= box["x2"] and box["y1"] <= y <= box["y2"]:
                 return box
         return None
+
+    async def _greet_face(self, face: Face) -> None:
+        face.name = "greeting"
+        face.name = await self.furhat.greet_and_name()
 
     def _ensure_mapper(self):
         if self.mapper is not None or self._last_frame is None:
