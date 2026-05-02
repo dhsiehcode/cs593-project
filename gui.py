@@ -200,14 +200,16 @@ class WebcamViewer(QWidget):
                 for idx, b in enumerate(results[0].boxes.xyxy.cpu().tolist(), start=1):
                     x1, y1, x2, y2 = map(int, b)
                     boxes.append({"id": idx, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
-                    if self._greeting_enabled and self._known_faces.get_by_id(idx) is None:
+                    if (self._greeting_enabled or self._gesture_mode) and \
+                            self._known_faces.get_by_id(idx) is None:
                         face = Face(
                             id=idx,
                             bbox=[x1, y1, x2, y2],
                             face_center=((x1 + x2) // 2, (y1 + y2) // 2),
                         )
                         self._known_faces.add(face)
-                        if self.furhat is not None:
+                        # greeting mode: greet immediately on first appearance
+                        if self._greeting_enabled and self.furhat is not None:
                             self.furhat.submit(self._greet_face(face))
             self._last_boxes = boxes
 
@@ -231,6 +233,9 @@ class WebcamViewer(QWidget):
                         f"Gesture → {salient.name} ID {salient.id} "
                         f"(score {salient.gesture_score:.2f})"
                     )
+                    # gesture mode (without greeting): greet only when gesture is detected
+                    if not self._greeting_enabled and salient.is_new() and self.furhat is not None:
+                        self.furhat.submit(self._greet_face(salient))
                     self._ensure_mapper()
                     if self.furhat is not None and self.mapper is not None and self.furhat.can_move_now():
                         bbox_dict = {"x1": salient.bbox[0], "y1": salient.bbox[1],
@@ -275,11 +280,11 @@ class WebcamViewer(QWidget):
             )
             if self._gesture_mode:
                 face = self._known_faces.get_by_id(box["id"])
-                if face is not None and face.gesture_score >= GestureDetector.RAISED_HAND_THRESHOLD:
+                if face is not None and face.gesture_score >= GestureDetector.WAVE_THRESHOLD:
                     cv2.putText(
                         display_frame,
-                        f"HAND ({face.gesture_score:.2f})",
-                        (x1, max(0, y1 - 22)),
+                        f"WAVE ({face.gesture_score:.2f})",
+                        (x2 + 6, y1 + 20),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.55,
                         (0, 0, 255),

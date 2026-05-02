@@ -138,6 +138,34 @@ class FurhatController:
 
         #text = result_text[0] if result_text else ""
         return text if text else "unknown"
+    
+    async def ask_to_play(self) -> None:
+        self.client.request_speak_text(
+            "Hello! Would you like to hear a joke?", wait = True, abort= True
+        )
+
+        self.client.request_led_set("blue")
+
+        user_utt = self.client.request_listen_start(
+            no_speech_timeout=5.0,
+            end_speech_timeout=1.0,
+        )
+        self.client.request_led_set("white")
+
+        if "yes" in user_utt:
+            self.client.request_speak_text(
+                "What is the opposite of artificial intelligence?", wait = True, abort= True
+            )
+
+            time.sleep(2)
+
+            self.client.request_speak_text(
+                "Natural stupidity", wait=True, abort=True
+            )
+        else:
+            self.client.request_speak_text(
+                "That's unfortunate. Maybe next time.", wait = True, abort= True
+            )
 
     def get_head_pose(self) -> Optional[HeadPose]:
         """
